@@ -1,4 +1,5 @@
 "use client";
+import { getWebSocketUrl } from "@/lib/websockets";
 import { useEffect, useRef, useState } from "react";
 import Webcam from "react-webcam";
 
@@ -109,143 +110,176 @@ export default function PremiumEmotionTracker() {
     }, []);
 
     const connectWebSocket = () => {
-        setStatus("Connecting to premium emotion server...");
+    setStatus("Connecting to premium emotion server...");
 
-        try {
-            const ws = new WebSocket("ws://localhost:8765");
-            wsRef.current = ws;
+    try {
+        const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+        console.log('Connecting to:', wsUrl);
 
-            ws.onopen = () => {
-                console.log("✅ Premium WebSocket connected successfully");
-                setConnected(true);
-                setStatus("Connected! Starting premium emotion tracking...");
-                startFrameCapture();
-            };
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
 
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
+        let heartbeatInterval;
+        let reconnectTimeout;
 
-                    if (data.type === 'premium_emotion_results') {
-                        const newFaceTracks = {};
-                        const newEmotionAnalytics = {};
-
-                        data.detections.forEach(detection => {
-                            const faceId = detection.face_id;
-                            const personName = detection.person_name || `Person_${detection.face_id}`;
-                            
-                            // Update face tracks
-                            newFaceTracks[faceId] = {
-                                id: faceId,
-                                personName: personName,
-                                bbox: detection.bbox || [0, 0, 0, 0],
-                                detectionCount: detection.track_count || 1,
-                                currentEmotion: detection.current_emotion || 'neutral',
-                                emotionConfidence: detection.emotion_confidence || 0,
-                                emotionCategory: detection.emotion_category || 'neutral',
-                                isHighConfidence: detection.is_high_confidence || false,
-                                emotionChanged: detection.emotion_changed || false,
-                                lastSeen: Date.now(),
-                                confirmed: detection.confirmed || false
-                            };
-
-                            // Update emotion analytics
-                            newEmotionAnalytics[faceId] = {
-                                stability: detection.emotion_stability || 0,
-                                currentDuration: detection.current_emotion_duration || 0,
-                                totalDuration: detection.total_emotion_duration || 0,
-                                dominantEmotion: detection.dominant_emotion || 'unknown',
-                                averageConfidence: detection.average_confidence || 0,
-                                totalTransitions: detection.total_transitions || 0,
-                                highConfidenceRatio: detection.high_confidence_ratio || 0,
-                                recentTrend: detection.recent_emotion_trend || [],
-                                context: detection.context || {}
-                            };
-
-                            // Update seen faces
-                            updateSeenFaces(faceId, personName);
-                        });
-
-                        setFaceTracks(newFaceTracks);
-                        setEmotionAnalytics(newEmotionAnalytics);
-
-                        // Update tracking list with premium data
-                        if (data.detections.length > 0) {
-                            setTrackingList(prev => {
-                                const newEntries = data.detections.map(detection => {
-                                    const faceId = detection.face_id;
-                                    const personName = detection.person_name || `Person_${detection.face_id}`;
-                                    
-                                    const isNewFace = isFaceTrulyNew(faceId, personName);
-                                    
-                                    return {
-                                        personName: personName,
-                                        faceId: faceId,
-                                        bbox: detection.bbox || [],
-                                        timestamp: detection.timestamp || new Date().toISOString(),
-                                        track_count: detection.track_count || 1,
-                                        
-                                        // Premium emotion data
-                                        current_emotion: detection.current_emotion || 'neutral',
-                                        emotion_confidence: detection.emotion_confidence || 0,
-                                        emotion_category: detection.emotion_category || 'neutral',
-                                        is_high_confidence: detection.is_high_confidence || false,
-                                        emotion_changed: detection.emotion_changed || false,
-                                        
-                                        // Analytics
-                                        emotion_stability: detection.emotion_stability || 0,
-                                        current_emotion_duration: detection.current_emotion_duration || 0,
-                                        total_emotion_duration: detection.total_emotion_duration || 0,
-                                        dominant_emotion: detection.dominant_emotion || 'unknown',
-                                        total_transitions: detection.total_transitions || 0,
-                                        high_confidence_ratio: detection.high_confidence_ratio || 0,
-                                        recent_trend: detection.recent_emotion_trend || [],
-                                        
-                                        // Context
-                                        context: detection.context || {},
-                                        
-                                        // Status
-                                        confirmed: detection.confirmed || false,
-                                        isNewFace: isNewFace,
-                                        emotion_record: detection.emotion_record || null
-                                    };
-                                });
-
-                                const updatedList = [...newEntries, ...prev].slice(0, MAX_ENTRIES);
-                                return updatedList;
-                            });
-                        }
-
-                        console.log(`🎯 Premium Update: ${data.high_confidence_tracks || 0} high-confidence emotions`);
-                    }
-                } catch (error) {
-                    console.error('Error processing WebSocket message:', error);
+        ws.onopen = () => {
+            console.log("✅ Premium WebSocket connected successfully");
+            setConnected(true);
+            setStatus("Connected! Starting premium emotion tracking...");
+            
+            // Start heartbeat
+            heartbeatInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
                 }
-            };
+            }, 15000); // Send ping every 15 seconds
+            
+            startFrameCapture();
+        };
 
-            ws.onclose = (event) => {
-                console.log("📞 WebSocket disconnected:", event.code, event.reason);
-                setConnected(false);
-                setStatus(`Disconnected (${event.code}). Retrying in 3s...`);
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
 
-                setTimeout(() => {
+                if (data.type === 'connection_established') {
+                    console.log('🔗 Server connection confirmed:', data.message);
+                    return;
+                }
+
+                if (data.type === 'pong') {
+                    console.log('💓 Heartbeat received');
+                    return;
+                }
+
+                if (data.type === 'premium_emotion_results') {
+                    // Your existing emotion processing code...
+                    const newFaceTracks = {};
+                    const newEmotionAnalytics = {};
+
+                    data.detections.forEach(detection => {
+                        const faceId = detection.face_id;
+                        const personName = detection.person_name || `Person_${detection.face_id}`;
+                        
+                        // Update face tracks
+                        newFaceTracks[faceId] = {
+                            id: faceId,
+                            personName: personName,
+                            bbox: detection.bbox || [0, 0, 0, 0],
+                            detectionCount: detection.track_count || 1,
+                            currentEmotion: detection.current_emotion || 'neutral',
+                            emotionConfidence: detection.emotion_confidence || 0,
+                            emotionCategory: detection.emotion_category || 'neutral',
+                            isHighConfidence: detection.is_high_confidence || false,
+                            emotionChanged: detection.emotion_changed || false,
+                            lastSeen: Date.now(),
+                            confirmed: detection.confirmed || false
+                        };
+
+                        // Update emotion analytics
+                        newEmotionAnalytics[faceId] = {
+                            stability: detection.emotion_stability || 0,
+                            currentDuration: detection.current_emotion_duration || 0,
+                            totalDuration: detection.total_emotion_duration || 0,
+                            dominantEmotion: detection.dominant_emotion || 'unknown',
+                            averageConfidence: detection.average_confidence || 0,
+                            totalTransitions: detection.total_transitions || 0,
+                            highConfidenceRatio: detection.high_confidence_ratio || 0,
+                            recentTrend: detection.recent_emotion_trend || [],
+                            context: detection.context || {}
+                        };
+
+                        updateSeenFaces(faceId, personName);
+                    });
+
+                    setFaceTracks(newFaceTracks);
+                    setEmotionAnalytics(newEmotionAnalytics);
+
+                    // Update tracking list
+                    if (data.detections.length > 0) {
+                        setTrackingList(prev => {
+                            const newEntries = data.detections.map(detection => {
+                                const faceId = detection.face_id;
+                                const personName = detection.person_name || `Person_${detection.face_id}`;
+                                const isNewFace = isFaceTrulyNew(faceId, personName);
+                                
+                                return {
+                                    personName: personName,
+                                    faceId: faceId,
+                                    bbox: detection.bbox || [],
+                                    timestamp: detection.timestamp || new Date().toISOString(),
+                                    track_count: detection.track_count || 1,
+                                    current_emotion: detection.current_emotion || 'neutral',
+                                    emotion_confidence: detection.emotion_confidence || 0,
+                                    emotion_category: detection.emotion_category || 'neutral',
+                                    is_high_confidence: detection.is_high_confidence || false,
+                                    emotion_changed: detection.emotion_changed || false,
+                                    emotion_stability: detection.emotion_stability || 0,
+                                    current_emotion_duration: detection.current_emotion_duration || 0,
+                                    total_emotion_duration: detection.total_emotion_duration || 0,
+                                    dominant_emotion: detection.dominant_emotion || 'unknown',
+                                    total_transitions: detection.total_transitions || 0,
+                                    high_confidence_ratio: detection.high_confidence_ratio || 0,
+                                    recent_trend: detection.recent_emotion_trend || [],
+                                    context: detection.context || {},
+                                    confirmed: detection.confirmed || false,
+                                    isNewFace: isNewFace,
+                                    emotion_record: detection.emotion_record || null
+                                };
+                            });
+
+                            const updatedList = [...newEntries, ...prev].slice(0, MAX_ENTRIES);
+                            return updatedList;
+                        });
+                    }
+
+                    console.log(`🎯 Premium Update: ${data.high_confidence_tracks || 0} high-confidence emotions`);
+                }
+
+                if (data.type === 'error') {
+                    console.error('Server error:', data.message);
+                }
+
+            } catch (error) {
+                console.error('Error processing WebSocket message:', error);
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log("📞 WebSocket disconnected:", event.code, event.reason);
+            setConnected(false);
+            
+            // Clear intervals
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            
+            // Don't show error for normal closure
+            if (event.code !== 1000) {
+                setStatus(`Disconnected (${event.code}). Retrying in 5s...`);
+                
+                // Reconnect after delay
+                reconnectTimeout = setTimeout(() => {
                     if (!connected) {
+                        console.log('🔄 Attempting to reconnect...');
                         connectWebSocket();
                     }
-                }, 3000);
-            };
+                }, 5000);
+            } else {
+                setStatus("Disconnected");
+            }
+        };
 
-            ws.onerror = (error) => {
-                console.log("❌ WebSocket error:", error);
-                setStatus("Connection error - Check if Python server is running");
-                setConnected(false);
-            };
-        } catch (error) {
-            console.log("❌ Failed to create WebSocket:", error);
-            setStatus("Failed to connect - Retrying...");
-            setTimeout(connectWebSocket, 3000);
-        }
-    };
+        ws.onerror = (error) => {
+            console.log("❌ WebSocket error:", error);
+            setStatus("Connection error - Check if server is running");
+            setConnected(false);
+        };
+
+    } catch (error) {
+        console.log("❌ Failed to create WebSocket:", error);
+        setStatus("Failed to connect - Retrying...");
+        setTimeout(connectWebSocket, 5000);
+    }
+};
 
     const startFrameCapture = () => {
         let lastSent = 0;
